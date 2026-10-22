@@ -37,4 +37,4 @@ cache="${2:-$HOME/qwentts-linux2204-cache}"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$out" "$cache"
 cp "$repo/scripts/build-engine-linux-docker.sh" "$out/.build-engine-linux-docker.sh"
-docker run --rm -v "$repo:/src:ro" -v "$(cd "$out" && pwd):/out" -v "$cache:/cache" nvidia/cuda:13.3.1-devel-ubuntu22.04 bash /out/.build-engine-linux-docker.sh --inside
+docker run --rm --cpus "$(( $(nproc) * 2 / 3 ))" -v "$repo:/src:ro" -v "$(cd "$out" && pwd):/out" -v "$cache:/cache" nvidia/cuda:13.3.1-devel-ubuntu22.04 bash /out/.build-engine-linux-docker.sh --inside
