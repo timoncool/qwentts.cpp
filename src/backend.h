@@ -151,9 +151,29 @@ static void backend_load_module(const std::string & dir, const std::string & reg
     const std::string file = "libggml-" + lower + ".so";
 #endif
     const std::string path = dir.empty() ? file : dir + "/" + file;
+#ifdef _WIN32
+    // ggml_backend_load reads the path in the ANSI code page, so a folder outside it (Cyrillic, CJK) is never found:
+    // the module is loaded by its UTF-16 path and registered the way ggml registers it.
+    const int    wide_len = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    std::wstring wide(wide_len > 0 ? wide_len : 0, L'\0');
+    if (wide_len > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), wide_len);
+    }
+    HMODULE module = wide_len > 0 ? LoadLibraryExW(wide.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH) : nullptr;
+    using init_fn  = ggml_backend_reg_t (*)(void);
+    init_fn init   = module ? reinterpret_cast<init_fn>(GetProcAddress(module, "ggml_backend_init")) : nullptr;
+    ggml_backend_reg_t reg = init ? init() : nullptr;
+    if (!reg) {
+        qt_log(QT_LOG_ERROR, "[Load] backend %s: cannot load %s (error %lu)", reg_name.c_str(), path.c_str(),
+               (unsigned long) GetLastError());
+        return;
+    }
+    ggml_backend_register(reg);
+#else
     if (!ggml_backend_load(path.c_str())) {
         qt_log(QT_LOG_ERROR, "[Load] backend %s: cannot load %s", reg_name.c_str(), path.c_str());
     }
+#endif
 }
 
 // Backends built as modules (GGML_BACKEND_DL) come from beside this library, so a host process finds the
