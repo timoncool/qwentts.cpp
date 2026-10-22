@@ -1,14 +1,15 @@
 #!/bin/bash
 # libqwen.so with its ggml libraries for Linux x86-64 (the Windows engine's counterpart), built in an Ubuntu 22.04
 # container (glibc 2.35: runs there and on anything newer) from the committed HEAD, no native CPU flags, no AVX-512,
-# no NCCL, machine code only (no PTX).
-#   cuda (default): CUDA 13.3, sm 75/80/86/89/90/100/120.
-#   cuda12:         CUDA 12.9, sm 52/60/61/70/75/80/86/89/90/120a.
-#   vulkan:         Vulkan and the CPU (LunarG Vulkan SDK; the system's Vulkan loader at run time).
-#   cpu:            the CPU alone.
+# no NCCL, machine code only (no PTX). The backends are modules (GGML_BACKEND_DL): the host loads the CPU one and
+# the one of the device it runs on, from beside libqwen.so.
+#   vulkan:         libqwen.so, ggml, the CPU and the Vulkan backends (LunarG Vulkan SDK; the system's Vulkan loader
+#                   at run time), and libgomp: the engine every computer gets.
+#   cuda (default): the CUDA 13.3 backend alone, libggml-cuda.so (sm 75/80/86/89/90/100/120).
+#   cuda12:         the CUDA 12.9 backend alone, libggml-cuda.so (sm 52/60/61/70/75/80/86/89/90/120a).
 # RUNPATH looks beside the library, in ../higgs-engine, where a studio keeps the CUDA 13 runtime and cuBLAS, and in
 # ../cuda12-runtime, where it keeps those of CUDA 12.9.
-#   scripts/build-engine-linux-docker.sh <output folder> [cache folder] [cuda|cuda12|vulkan|cpu]
+#   scripts/build-engine-linux-docker.sh <output folder> [cache folder] [cuda|cuda12|vulkan]
 set -euo pipefail
 
 VULKAN_SDK_VERSION="1.4.357.0"
@@ -19,10 +20,10 @@ if [ "${1:-}" = "--inside" ]; then
   apt-get update -q >/dev/null
   apt-get install -y -q --no-install-recommends git ninja-build python3-pip ca-certificates build-essential curl xz-utils patchelf >/dev/null
   pip3 install -q "cmake>=3.28" >/dev/null
-  flags=(-DGGML_CUDA=OFF -DGGML_VULKAN=OFF)
+  targets=(ggml-cuda)
   case "$backend" in
-    cuda) flags=(-DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_ARCHITECTURES=75-real;80-real;86-real;89-real;90-real;100-real;120-real") ;;
-    cuda12) flags=(-DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_FLAGS=-Wno-deprecated-gpu-targets"
+    cuda) flags=(-DGGML_VULKAN=OFF -DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_ARCHITECTURES=75-real;80-real;86-real;89-real;90-real;100-real;120-real") ;;
+    cuda12) flags=(-DGGML_VULKAN=OFF -DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_FLAGS=-Wno-deprecated-gpu-targets"
                    "-DCMAKE_CUDA_ARCHITECTURES=52-real;60-real;61-real;70-real;75-real;80-real;86-real;89-real;90-real;120a-real") ;;
     vulkan)
       sdk=/cache/vulkansdk-$VULKAN_SDK_VERSION
@@ -33,9 +34,9 @@ if [ "${1:-}" = "--inside" ]; then
       fi
       export VULKAN_SDK="$sdk/x86_64" PATH="$sdk/x86_64/bin:$PATH"
       cp -P "$sdk"/x86_64/lib/VulkanLoader/lib/libvulkan.so* /usr/lib/x86_64-linux-gnu/
-      flags=(-DGGML_CUDA=OFF -DGGML_VULKAN=ON -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so) ;;
-    cpu) ;;
-    *) echo "[ERROR] backend $backend: cuda, cuda12, vulkan or cpu"; exit 1 ;;
+      flags=(-DGGML_CUDA=OFF -DGGML_VULKAN=ON -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so)
+      targets=(qwen ggml-cpu ggml-vulkan) ;;
+    *) echo "[ERROR] backend $backend: cuda, cuda12 or vulkan"; exit 1 ;;
   esac
   echo "[..] source $(git -c safe.directory='*' -C /src rev-parse --short HEAD), $backend"
   rm -rf /cache/src && mkdir -p /cache/src
@@ -46,23 +47,27 @@ if [ "${1:-}" = "--inside" ]; then
   cd /cache/src
   # settings come from this script alone, not from a cache an earlier run left
   rm -rf "/cache/build-$backend/CMakeCache.txt"
-  cmake -B "/cache/build-$backend" -G Ninja -DCMAKE_BUILD_TYPE=Release -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON \
+  cmake -B "/cache/build-$backend" -G Ninja -DCMAKE_BUILD_TYPE=Release -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON \
     -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF \
     '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../higgs-engine;$ORIGIN/../cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
-  cmake --build "/cache/build-$backend" --target qwen -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
+  cmake --build "/cache/build-$backend" --target "${targets[@]}" -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
   out="/out/$backend"
   rm -rf "$out" && mkdir -p "$out"
-  # only the names the loader asks for (each library's SONAME), not the version links that copy the same file again,
-  # and libgomp, which ggml's CPU code needs
-  find "/cache/build-$backend" -name 'libqwen.so' -o -name 'libggml*.so.0' | while read -r f; do cp -L "$f" "$out/"; done
-  cp "$(gcc -print-file-name=libgomp.so.1)" "$out/"
+  # only the names the loader asks for (each library's SONAME, the backend modules by their file name), not the
+  # version links that copy the same file again, and libgomp, which ggml's CPU backend needs
+  if [ "$backend" = "vulkan" ]; then
+    find "/cache/build-$backend" \( -name 'libqwen.so' -o -name 'libggml.so.0' -o -name 'libggml-base.so.0' -o -name 'libggml-cpu.so' -o -name 'libggml-vulkan.so' \) | while read -r f; do cp -L "$f" "$out/"; done
+    cp "$(gcc -print-file-name=libgomp.so.1)" "$out/"
+  else
+    find "/cache/build-$backend" -name 'libggml-cuda.so' | while read -r f; do cp -L "$f" "$out/"; done
+  fi
   # the CUDA toolkit's folder of the build machine must not reach a user's machine
   for f in "$out"/*.so*; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../higgs-engine:$ORIGIN/../cuda12-runtime' "$f"; done
   for f in "$out"/*.so*; do echo "$(basename "$f"): zmm $(objdump -d --no-show-raw-insn "$f" | grep -c '%zmm' || true)"; done
-  readelf -d "$out/libqwen.so" | grep -E 'NEEDED|RUNPATH'
+  for f in "$out"/*.so*; do echo "$(basename "$f"): $(readelf -d "$f" | grep -E 'NEEDED|RUNPATH' | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' ')"; done
   sha256sum "$out"/*.so*
-  echo "[OK] libqwen.so ($backend)"
+  echo "[OK] $backend"
   exit 0
 fi
 
