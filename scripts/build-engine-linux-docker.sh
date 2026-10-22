@@ -6,7 +6,8 @@
 #   cuda12:         CUDA 12.9, sm 52/60/61/70/75/80/86/89/90/120a.
 #   vulkan:         Vulkan and the CPU (LunarG Vulkan SDK; the system's Vulkan loader at run time).
 #   cpu:            the CPU alone.
-# RUNPATH looks beside the library and in ../higgs-engine, where a studio keeps the CUDA runtime and cuBLAS.
+# RUNPATH looks beside the library, in ../higgs-engine, where a studio keeps the CUDA 13 runtime and cuBLAS, and in
+# ../cuda12-runtime, where it keeps those of CUDA 12.9.
 #   scripts/build-engine-linux-docker.sh <output folder> [cache folder] [cuda|cuda12|vulkan|cpu]
 set -euo pipefail
 
@@ -47,14 +48,14 @@ if [ "${1:-}" = "--inside" ]; then
   rm -rf "/cache/build-$backend/CMakeCache.txt"
   cmake -B "/cache/build-$backend" -G Ninja -DCMAKE_BUILD_TYPE=Release -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON \
     -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF \
-    '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../higgs-engine' "${flags[@]}" >/dev/null
+    '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../higgs-engine;$ORIGIN/../cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
   cmake --build "/cache/build-$backend" --target qwen -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
   out="/out/$backend"
   rm -rf "$out" && mkdir -p "$out"
   find "/cache/build-$backend" -name 'libqwen.so*' -o -name 'libggml*.so*' | while read -r f; do cp -L "$f" "$out/"; done
   # the CUDA toolkit's folder of the build machine must not reach a user's machine
-  for f in "$out"/*.so*; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../higgs-engine' "$f"; done
+  for f in "$out"/*.so*; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../higgs-engine:$ORIGIN/../cuda12-runtime' "$f"; done
   for f in "$out"/*.so*; do echo "$(basename "$f"): zmm $(objdump -d --no-show-raw-insn "$f" | grep -c '%zmm' || true)"; done
   readelf -d "$out/libqwen.so" | grep -E 'NEEDED|RUNPATH'
   sha256sum "$out"/*.so*
