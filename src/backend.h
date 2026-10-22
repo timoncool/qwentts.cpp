@@ -18,6 +18,18 @@
 #include <string>
 #include <thread>
 
+#ifdef _WIN32
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <windows.h>
+#else
+#    include <dlfcn.h>
+#endif
+
 struct BackendPair {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
@@ -97,20 +109,85 @@ static void qt_ggml_log(enum ggml_log_level level, const char * text, void * use
 
 // Install the log callback and load every backend. Magic static: it
 // happens exactly once, safe under concurrent qt_init calls.
-static void backend_load(void) {
-    static const bool loaded = [] {
-        ggml_log_set(qt_ggml_log, nullptr);
-        ggml_backend_load_all();
-        return true;
-    }();
-    (void) loaded;
+// UTF-8 folder of the module holding this code (qwen.dll / libqwen.so, or the
+// executable of a static build), empty when the system cannot tell.
+static std::string backend_module_dir(void) {
+    std::string path;
+#ifdef _WIN32
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&backend_module_dir), &module)) {
+        std::wstring wide(32768, L'\0');
+        const DWORD  n = GetModuleFileNameW(module, wide.data(), (DWORD) wide.size());
+        if (n > 0 && n < wide.size()) {
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int) n, nullptr, 0, nullptr, nullptr);
+            path.resize(bytes);
+            WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int) n, path.data(), bytes, nullptr, nullptr);
+        }
+    }
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void *>(&backend_module_dir), &info) && info.dli_fname) {
+        path = info.dli_fname;
+    }
+#endif
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// Loads the backend module of one registry (CPU, CUDA, Vulkan) from dir unless that backend is
+// registered already (a static build registers its backends itself).
+static void backend_load_module(const std::string & dir, const std::string & reg_name) {
+    if (ggml_backend_reg_by_name(reg_name.c_str())) {
+        return;
+    }
+    std::string lower = reg_name;
+    for (char & c : lower) {
+        c = (char) std::tolower((unsigned char) c);
+    }
+#ifdef _WIN32
+    const std::string file = "ggml-" + lower + ".dll";
+#else
+    const std::string file = "libggml-" + lower + ".so";
+#endif
+    const std::string path = dir.empty() ? file : dir + "/" + file;
+    if (!ggml_backend_load(path.c_str())) {
+        qt_log(QT_LOG_ERROR, "[Load] backend %s: cannot load %s", reg_name.c_str(), path.c_str());
+    }
+}
+
+// Backends built as modules (GGML_BACKEND_DL) come from beside this library, so a host process finds the
+// ggml-*.dll that ship with it. A named device (CUDA0, Vulkan0, CPU) loads the CPU backend and that
+// device's own backend only, so a backend nobody runs is never loaded; no device loads every one there.
+static void backend_load(const char * device) {
+    static std::mutex lock;
+    std::lock_guard<std::mutex> guard(lock);
+    static const bool logging = (ggml_log_set(qt_ggml_log, nullptr), true);
+    (void) logging;
+    const std::string dir = backend_module_dir();
+    if (!device) {
+        static bool all = false;
+        if (!all) {
+            ggml_backend_load_all_from_path(dir.empty() ? nullptr : dir.c_str());
+            all = true;
+        }
+        return;
+    }
+    backend_load_module(dir, "CPU");
+    std::string reg = device;
+    while (!reg.empty() && std::isdigit((unsigned char) reg.back())) {
+        reg.pop_back();
+    }
+    if (!reg.empty() && reg != "CPU") {
+        backend_load_module(dir, reg);
+    }
 }
 
 // True when name matches a device (CUDA0, Vulkan0, MTL0, CPU...), the
 // check of a --device argument. Otherwise logs the available devices on
 // one self-contained line and returns false.
 static bool backend_check_device(const char * name) {
-    backend_load();
+    backend_load(name);
     if (ggml_backend_dev_by_name(name)) {
         return true;
     }
@@ -132,7 +209,7 @@ static bool backend_check_device(const char * name) {
 // Returns a BackendPair with .backend == NULL when initialisation fails;
 // the caller must check this before passing it to any pipeline_*_load.
 static BackendPair backend_init(const char * label, const char * device) {
-    backend_load();
+    backend_load(device);
 
     BackendPair bp = {};
     bp.backend     = device ? ggml_backend_init_by_name(device, nullptr) : ggml_backend_init_best();
