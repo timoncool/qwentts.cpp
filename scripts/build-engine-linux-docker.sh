@@ -53,7 +53,10 @@ if [ "${1:-}" = "--inside" ]; then
   cmake --build "/cache/build-$backend" --target qwen -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
   out="/out/$backend"
   rm -rf "$out" && mkdir -p "$out"
-  find "/cache/build-$backend" -name 'libqwen.so*' -o -name 'libggml*.so*' | while read -r f; do cp -L "$f" "$out/"; done
+  # only the names the loader asks for (each library's SONAME), not the version links that copy the same file again,
+  # and libgomp, which ggml's CPU code needs
+  find "/cache/build-$backend" -name 'libqwen.so' -o -name 'libggml*.so.0' | while read -r f; do cp -L "$f" "$out/"; done
+  cp "$(gcc -print-file-name=libgomp.so.1)" "$out/"
   # the CUDA toolkit's folder of the build machine must not reach a user's machine
   for f in "$out"/*.so*; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../higgs-engine:$ORIGIN/../cuda12-runtime' "$f"; done
   for f in "$out"/*.so*; do echo "$(basename "$f"): zmm $(objdump -d --no-show-raw-insn "$f" | grep -c '%zmm' || true)"; done
