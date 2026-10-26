@@ -1,0 +1,42 @@
+name: Engine macOS
+
+# The Apple silicon engine of an engine-* tag (scripts/build-engine-macos.sh), attached to that tag's release.
+# The Windows and Linux engines are built on the release machine.
+
+on:
+  push:
+    tags: ['engine-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "engine-* tag to build and attach to"
+        required: true
+
+concurrency:
+  group: engine-macos-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+      - name: Tools
+        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+      - name: Build
+        run: bash scripts/build-engine-macos.sh out
+      - name: Attach to the release
+        run: |
+          set -e
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --notes "Engine $TAG."
+          gh release upload "$TAG" out/qwen-macos-arm64.tar.gz --clobber
