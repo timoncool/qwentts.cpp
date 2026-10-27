@@ -35,7 +35,7 @@ if [ "${1:-}" = "--inside" ]; then
       export VULKAN_SDK="$sdk/x86_64" PATH="$sdk/x86_64/bin:$PATH"
       cp -P "$sdk"/x86_64/lib/VulkanLoader/lib/libvulkan.so* /usr/lib/x86_64-linux-gnu/
       flags=(-DGGML_CUDA=OFF -DGGML_VULKAN=ON -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so)
-      targets=(qwen ggml-cpu ggml-vulkan) ;;
+      targets=(qwen ggml-vulkan) ;;
     *) echo "[ERROR] backend $backend: cuda, cuda12 or vulkan"; exit 1 ;;
   esac
   echo "[..] source $(git -c safe.directory='*' -C /src rev-parse --short HEAD), $backend"
@@ -48,7 +48,7 @@ if [ "${1:-}" = "--inside" ]; then
   # settings come from this script alone, not from a cache an earlier run left
   rm -rf "/cache/build-$backend/CMakeCache.txt"
   cmake -B "/cache/build-$backend" -G Ninja -DCMAKE_BUILD_TYPE=Release -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON \
-    -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF \
+    -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF \
     '-DCMAKE_BUILD_RPATH=$ORIGIN;$ORIGIN/../higgs-engine;$ORIGIN/../cuda12-runtime' "${flags[@]}" >/dev/null
   echo "[..] build"
   cmake --build "/cache/build-$backend" --target "${targets[@]}" -j "$(( $(nproc) * 3 / 4 ))" 2>&1 | tail -3
@@ -57,7 +57,7 @@ if [ "${1:-}" = "--inside" ]; then
   # only the names the loader asks for (each library's SONAME, the backend modules by their file name), not the
   # version links that copy the same file again, and libgomp, which ggml's CPU backend needs
   if [ "$backend" = "vulkan" ]; then
-    find "/cache/build-$backend" \( -name 'libqwen.so' -o -name 'libggml.so.0' -o -name 'libggml-base.so.0' -o -name 'libggml-cpu.so' -o -name 'libggml-vulkan.so' \) | while read -r f; do cp -L "$f" "$out/"; done
+    find "/cache/build-$backend" \( -name 'libqwen.so' -o -name 'libggml.so.0' -o -name 'libggml-base.so.0' -o -name 'libggml-cpu-*.so' -o -name 'libggml-vulkan.so' \) | while read -r f; do cp -L "$f" "$out/"; done
     cp "$(gcc -print-file-name=libgomp.so.1)" "$out/"
   else
     find "/cache/build-$backend" -name 'libggml-cuda.so' | while read -r f; do cp -L "$f" "$out/"; done

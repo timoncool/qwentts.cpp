@@ -43,7 +43,7 @@ goto :configure
 :setup_vulkan
 call "%VCVARS%" >nul
 set "FLAGS=-DGGML_VULKAN=ON -DGGML_CUDA=OFF"
-set "TARGETS=qwen ggml-cpu ggml-vulkan"
+set "TARGETS=qwen ggml-vulkan"
 goto :configure
 
 :configure
@@ -53,7 +53,7 @@ echo [..] source, %BACKEND%
 rem settings come from this script alone, not from a cache an earlier run left
 cmake --fresh -S . -B "%BUILD%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON ^
   -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
-  -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=OFF ^
+  -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF ^
   %FLAGS% >nul || (echo [ERROR] configure & exit /b 1)
 echo [..] build
 start "" /b /belownormal /wait cmake --build "%BUILD%" --target %TARGETS% -j 8 || (echo [ERROR] build & exit /b 1)
