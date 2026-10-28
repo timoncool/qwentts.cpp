@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -176,6 +177,88 @@ static void backend_load_module(const std::string & dir, const std::string & reg
 #endif
 }
 
+// An all-variants build (GGML_CPU_ALL_VARIANTS) has no ggml-cpu module but one per instruction level, ggml-cpu-x64 to
+// ggml-cpu-sapphirerapids: the one this processor scores highest is loaded, as ggml_backend_load_all does, so any x86-64
+// runs the engine. A build with a single CPU module loads that one.
+static void backend_load_cpu(const std::string & dir) {
+    if (dir.empty() || ggml_backend_reg_by_name("CPU")) {
+        backend_load_module(dir, "CPU");
+        return;
+    }
+    using score_fn = int (*)(void);
+    using init_fn  = ggml_backend_reg_t (*)(void);
+#ifdef _WIN32
+    const int    wide_len = MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0);
+    std::wstring wide(wide_len > 1 ? wide_len - 1 : 0, L'\0');
+    if (wide_len > 1) {
+        MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, wide.data(), wide_len);
+    }
+    const std::filesystem::path folder(wide);
+    const std::wstring          prefix = L"ggml-cpu-", suffix = L".dll";
+    HMODULE                     best   = nullptr;
+#else
+    const std::filesystem::path folder(dir);
+    const std::string           prefix = "libggml-cpu-", suffix = ".so";
+    void *                      best   = nullptr;
+#endif
+    int             best_score = 0;
+    std::string     best_name;
+    std::error_code ec;
+    for (const auto & entry : std::filesystem::directory_iterator(folder, ec)) {
+#ifdef _WIN32
+        const std::wstring name = entry.path().filename().wstring();
+#else
+        const std::string name = entry.path().filename().string();
+#endif
+        if (name.size() <= prefix.size() + suffix.size() || name.compare(0, prefix.size(), prefix) != 0 ||
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+            continue;
+        }
+#ifdef _WIN32
+        HMODULE  module = LoadLibraryExW(entry.path().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        score_fn score  = module ? reinterpret_cast<score_fn>(GetProcAddress(module, "ggml_backend_score")) : nullptr;
+#else
+        void *   module = dlopen(entry.path().c_str(), RTLD_NOW | RTLD_LOCAL);
+        score_fn score  = module ? reinterpret_cast<score_fn>(dlsym(module, "ggml_backend_score")) : nullptr;
+#endif
+        const int value = score ? score() : 0;
+        if (value > best_score) {
+            if (best) {
+#ifdef _WIN32
+                FreeLibrary(best);
+#else
+                dlclose(best);
+#endif
+            }
+            best       = module;
+            best_score = value;
+            best_name  = entry.path().filename().string();
+        } else if (module) {
+#ifdef _WIN32
+            FreeLibrary(module);
+#else
+            dlclose(module);
+#endif
+        }
+    }
+    if (!best) {
+        backend_load_module(dir, "CPU");
+        return;
+    }
+#ifdef _WIN32
+    init_fn init = reinterpret_cast<init_fn>(GetProcAddress(best, "ggml_backend_init"));
+#else
+    init_fn init = reinterpret_cast<init_fn>(dlsym(best, "ggml_backend_init"));
+#endif
+    ggml_backend_reg_t reg = init ? init() : nullptr;
+    if (!reg) {
+        qt_log(QT_LOG_ERROR, "[Load] backend CPU: cannot load %s", best_name.c_str());
+        return;
+    }
+    ggml_backend_register(reg);
+    qt_log(QT_LOG_INFO, "[Load] backend CPU: %s", best_name.c_str());
+}
+
 // Backends built as modules (GGML_BACKEND_DL) come from beside this library, so a host process finds the
 // ggml-*.dll that ship with it. A named device (CUDA0, Vulkan0, CPU) loads the CPU backend and that
 // device's own backend only, so a backend nobody runs is never loaded; no device loads every one there.
@@ -193,7 +276,7 @@ static void backend_load(const char * device) {
         }
         return;
     }
-    backend_load_module(dir, "CPU");
+    backend_load_cpu(dir);
     std::string reg = device;
     while (!reg.empty() && std::isdigit((unsigned char) reg.back())) {
         reg.pop_back();
